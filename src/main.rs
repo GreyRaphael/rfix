@@ -23,7 +23,7 @@ struct Session {
     heart_bt_int: String,
 }
 
-type SessionMap = Arc<DashMap<SocketAddr, Session>>;
+type SessionMap = Arc<DashMap<String, Session>>; // key = SenderCompID
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -41,13 +41,14 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn handle_connection(mut stream: TcpStream, addr: SocketAddr, sessions: SessionMap) -> Result<()> {
+async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: SessionMap) -> Result<()> {
     let mut buf = [0u8; 4096];
     let mut data = Vec::new();
 
     loop {
         let n = stream.read(&mut buf).await?;
         if n == 0 {
+            println!("string length = 0");
             break;
         }
         data.extend_from_slice(&buf[..n]);
@@ -56,51 +57,49 @@ async fn handle_connection(mut stream: TcpStream, addr: SocketAddr, sessions: Se
             let raw = data.drain(..end).collect::<Vec<u8>>();
             let tags = parse_fix(&raw);
             println!("{:?}", tags);
-            match tags.get(&35).copied() {
+
+            let msg_type = tags.get(&35).copied();
+            let client = tags.get(&49).unwrap_or(&"").to_string(); // client
+            let server = tags.get(&56).unwrap_or(&"").to_string(); // this server
+
+            match msg_type {
                 Some("A") => {
-                    let client = tags.get(&49).unwrap_or(&"").to_string(); // From client
-                    let server = tags.get(&56).unwrap_or(&"").to_string(); // Our server ID
+                    // 重建 Session（即使之前存在）
                     let encrypt = tags.get(&98).unwrap_or(&"0").to_string();
                     let hb = tags.get(&108).unwrap_or(&"30").to_string();
+                    let seq = 1;
 
-                    let mut sess = sessions.entry(addr).or_insert(Session {
-                        logged_on: false,
-                        sender: server.clone(), // Our ID
-                        target: client.clone(), // Client ID
-                        seq_num: 1,
+                    let sess = Session {
+                        logged_on: true,
+                        sender: server.clone(),
+                        target: client.clone(),
+                        seq_num: seq + 1,
                         encrypt_method: encrypt.clone(),
                         heart_bt_int: hb.clone(),
-                    });
+                    };
+                    sessions.insert(client.clone(), sess); // key by client ID
 
-                    sess.logged_on = true;
-
-                    let resp = build_logon_response(&sess.sender, &sess.target, sess.seq_num, &encrypt, &hb);
-                    sess.seq_num += 1;
-
+                    let resp = build_logon_response(&server, &client, seq, &encrypt, &hb);
                     stream.write_all(&resp).await?;
                 }
                 Some("D") => {
-                    if let Some(mut sess) = sessions.get_mut(&addr) {
+                    if let Some(mut sess) = sessions.get_mut(&client) {
                         if sess.logged_on {
-                            let exec = build_execution_report(&sess.sender, &sess.target, sess.seq_num, &tags);
+                            let resp = build_execution_report(&sess.sender, &sess.target, sess.seq_num, &tags);
                             sess.seq_num += 1;
-                            let s = String::from_utf8_lossy(&exec).replace('\x01', "^");
-                            println!("Converted lossy: {}", s);
-                            stream.write_all(&exec).await?;
+                            stream.write_all(&resp).await?;
                         }
                     }
                 }
                 Some("5") => {
-                    println!("Logout received from {}", addr);
-                    if let Some(mut sess) = sessions.get_mut(&addr) {
-                        let logout_resp = build_standard_response("5", &sess.target, &sess.sender, sess.seq_num);
-                        sess.seq_num += 1;
+                    if let Some(sess) = sessions.get(&client) {
+                        let logout_resp = build_standard_response("5", &sess.sender, &sess.target, sess.seq_num);
                         stream.write_all(&logout_resp).await?;
-                        sessions.remove(&addr);
+                        println!("Logout complete: {}", client);
                     }
-                    break;
+                    let _ = stream.shutdown().await;
+                    sessions.remove(&client);
                 }
-
                 _ => {}
             }
         }
