@@ -7,6 +7,7 @@ edition = "2024"
 ahash = "0.8.12"
 anyhow = "1.0.98"
 bytes = "1.10.1"
+chrono = "0.4.41"
 dashmap = "6.1.0"
 memchr = "2.7.5"
 tokio = {version = "1.47.0", features = ["full"]}
