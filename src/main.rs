@@ -100,6 +100,16 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                     let _ = stream.shutdown().await;
                     sessions.remove(&client);
                 }
+                Some("0") => {
+                    // 收到客户端 Heartbeat，主动回复一个 Heartbeat（不含112）
+                    if let Some(mut sess) = sessions.get_mut(&client) {
+                        let heartbeat = build_heartbeat(&sess.sender, &sess.target, sess.seq_num);
+                        sess.seq_num += 1;
+                        stream.write_all(&heartbeat).await?;
+                        println!("Responded Heartbeat to {}", client);
+                    }
+                }
+
                 _ => {}
             }
         }
@@ -191,6 +201,33 @@ fn build_execution_report(sender: &str, target: &str, seq: u32, tags: &AHashMap<
     msg.extend_from_slice(format!("10={:03}", csum).as_bytes());
 
     msg
+}
+
+fn build_heartbeat(sender: &str, target: &str, seq: u32) -> Vec<u8> {
+    let ts = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
+
+    // Body without BeginString and BodyLength
+    let body = format!("35=034={}49={}56={}52={}", seq, sender, target, ts);
+
+    // Build full message
+    let mut msg = format!("8=FIX.4.2");
+    msg.push_str(&format!("9={}", body.len())); // BodyLength
+    msg.push_str(&body); // Append body
+
+    // Compute checksum
+    let cksum: u32 = msg.bytes().map(|b| b as u32).sum::<u32>() % 256;
+    msg.push_str(&format!("10={:03}", cksum));
+
+    msg.as_bytes().to_vec()
+}
+
+fn add_checksum(msg: &mut String) -> Vec<u8> {
+    let body = msg.as_bytes();
+    let len = body.len();
+    let checksum: u32 = body.iter().map(|b| *b as u32).sum::<u32>() % 256;
+    msg.insert_str(0, &format!("9={}", len));
+    msg.push_str(&format!("10={:03}", checksum));
+    msg.as_bytes().to_vec()
 }
 
 fn parse_fix<'a>(msg: &'a [u8]) -> AHashMap<u16, &'a str> {
