@@ -6,6 +6,8 @@ use ahash::AHashMap;
 use anyhow::Result;
 use chrono::Utc;
 use dashmap::DashMap;
+use log::{error, info};
+use log4rs;
 use memchr::memchr;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::{
@@ -27,6 +29,10 @@ type SessionMap = Arc<DashMap<String, Session>>; // key = SenderCompID
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // initialize from our YAML:
+    log4rs::init_file("config/log4rs.yaml", Default::default())?;
+    info!("Server starting…");
+
     let listener = TcpListener::bind("0.0.0.0:9888").await?;
     let sessions: SessionMap = Arc::new(DashMap::new());
 
@@ -35,7 +41,7 @@ async fn main() -> Result<()> {
         let sessions = sessions.clone();
         tokio::spawn(async move {
             if let Err(e) = handle_connection(socket, addr, sessions).await {
-                eprintln!("Client {} error: {:?}", addr, e);
+                error!("Client {} error: {:?}", addr, e);
             }
         });
     }
@@ -48,7 +54,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
     loop {
         let n = stream.read(&mut buf).await?;
         if n == 0 {
-            println!("string length = 0");
+            info!("string length = 0");
             break;
         }
         data.extend_from_slice(&buf[..n]);
@@ -56,7 +62,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
         while let Some(end) = find_fix_end(&data) {
             let raw = data.drain(..end).collect::<Vec<u8>>();
             let tags = parse_fix(&raw);
-            println!("{:?}", tags);
+            info!("{:?}", tags);
 
             let msg_type = tags.get(&35).copied();
             let client = tags.get(&49).unwrap_or(&"").to_string(); // client
@@ -95,7 +101,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                     if let Some(sess) = sessions.get(&client) {
                         let logout_resp = build_standard_response("5", &sess.sender, &sess.target, sess.seq_num);
                         stream.write_all(&logout_resp).await?;
-                        println!("Logout complete: {}", client);
+                        info!("Logout complete: {}", client);
                     }
                     let _ = stream.shutdown().await;
                     sessions.remove(&client);
@@ -106,7 +112,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                         let heartbeat = build_heartbeat(&sess.sender, &sess.target, sess.seq_num);
                         sess.seq_num += 1;
                         stream.write_all(&heartbeat).await?;
-                        println!("Responded Heartbeat to {}", client);
+                        info!("Responded Heartbeat to {}", client);
                     }
                 }
 
