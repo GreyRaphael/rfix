@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
 
 async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: SessionMap) -> Result<()> {
     let mut buf = [0u8; 4096];
-    let mut data = BytesMut::with_capacity(8192);
+    let mut data = BytesMut::with_capacity(10240);
 
     loop {
         let n = stream.read(&mut buf).await?;
