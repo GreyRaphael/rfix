@@ -78,7 +78,8 @@ struct Session {
 
 type SessionMap = Arc<DashMap<String, Session>>;
 
-#[tokio::main]
+// #[tokio::main]
+#[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     log4rs::init_file("config/log4rs.yaml", Default::default())?;
     info!("Server starting...");
