@@ -2,7 +2,7 @@ use ahash::AHashMap;
 use anyhow::Result;
 use chrono::Utc;
 use dashmap::DashMap;
-use log::{error, info};
+use log::{debug, error, info};
 use log4rs;
 use memchr::memchr;
 use std::{net::SocketAddr, sync::Arc};
@@ -45,6 +45,7 @@ async fn main() -> Result<()> {
 async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: SessionMap) -> Result<()> {
     let mut buf = [0u8; 4096];
     let mut data = Vec::with_capacity(8192);
+    info!("recv message");
 
     loop {
         let n = stream.read(&mut buf).await?;
@@ -57,7 +58,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
         while let Some(end) = find_fix_end(&data) {
             let raw = data.drain(..end).collect::<Vec<u8>>();
             let tags = parse_fix(&raw);
-            info!("{:?}", tags);
+            debug!("{:?}", tags);
 
             let msg_type = tags.get(&35).copied();
             let client = tags.get(&49).unwrap_or(&"").to_string();
@@ -107,11 +108,12 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                     if let Some(mut sess) = sessions.get_mut(&client) {
                         stream.write_all(&build_heartbeat(&sess.sender, &sess.target, sess.seq_num)).await?;
                         sess.seq_num += 1;
-                        info!("Responded Heartbeat to {}", client);
+                        debug!("Responded Heartbeat to {}", client);
                     }
                 }
                 _ => {}
             }
+            info!("response message");
         }
     }
     Ok(())
