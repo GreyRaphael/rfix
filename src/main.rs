@@ -1,9 +1,11 @@
 use anyhow::Result;
 use bytes::{BufMut, BytesMut};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use fast_log;
+use fast_log::appender::{FastLogRecord, RecordFormat};
+use fast_log::config::Config;
 use log::{debug, error, info};
-use log4rs;
 use memchr::memchr;
 use smallvec::SmallVec;
 use std::{fmt::Write, net::SocketAddr, str, sync::Arc};
@@ -78,10 +80,24 @@ struct Session {
 
 type SessionMap = Arc<DashMap<String, Session>>;
 
+pub struct NanoFormatter;
+
+impl RecordFormat for NanoFormatter {
+    fn do_format(&self, record: &mut FastLogRecord) {
+        record.formated = format!(
+            "{} [{}] {}\n",
+            // DateTime::<Local>::from(record.now).format("%FT%T%.9f"),
+            DateTime::<Utc>::from(record.now).format("%FT%T%.9f"),
+            record.level,
+            record.args
+        );
+    }
+}
+
 // #[tokio::main]
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
-    log4rs::init_file("config/log4rs.yaml", Default::default())?;
+    fast_log::init(Config::new().format(NanoFormatter).file("app.log").chan_len(Some(10240)))?;
     info!("Server starting...");
 
     let listener = TcpListener::bind("0.0.0.0:9888").await?;
