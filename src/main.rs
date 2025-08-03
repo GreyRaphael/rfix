@@ -117,12 +117,11 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
             info!("{}", std::str::from_utf8(&raw)?);
 
             let msg = FixMessage::parse(&raw);
-            let msg_type = msg.get_str(35);
             let client = msg.get_str(49).unwrap_or("").to_string();
             let server = msg.get_str(56).unwrap_or("").to_string();
 
-            match msg_type {
-                Some("A") => {
+            match msg.get_raw(35) {
+                Some(b"A") => {
                     let encrypt = msg.get_str(98).unwrap_or("0").to_string();
                     let hb = msg.get_str(108).unwrap_or("30").to_string();
                     let seq = 1;
@@ -140,7 +139,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                     );
                     stream.write_all(&build_logon_response(&server, &client, seq, &encrypt, &hb)).await?;
                 }
-                Some("D") => {
+                Some(b"D") => {
                     if let Some(mut sess) = sessions.get_mut(&client) {
                         if sess.logged_on {
                             let resp = build_execution_report(&sess.sender, &sess.target, sess.seq_num, &msg);
@@ -150,7 +149,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                         }
                     }
                 }
-                Some("5") => {
+                Some(b"5") => {
                     if let Some(sess) = sessions.get(&client) {
                         stream
                             .write_all(&build_standard_response("5", &sess.sender, &sess.target, sess.seq_num))
@@ -160,7 +159,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                     let _ = stream.shutdown().await;
                     sessions.remove(&client);
                 }
-                Some("0") => {
+                Some(b"0") => {
                     if let Some(mut sess) = sessions.get_mut(&client) {
                         stream.write_all(&build_heartbeat(&sess.sender, &sess.target, sess.seq_num)).await?;
                         sess.seq_num += 1;
