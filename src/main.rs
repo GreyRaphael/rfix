@@ -1,10 +1,11 @@
 use anyhow::Result;
-use bytes::BytesMut;
+use bytes::{BufMut, BytesMut};
 use chrono::Utc;
 use dashmap::DashMap;
 use log::{debug, error, info};
 use log4rs;
 use memchr::memchr;
+use smallvec::SmallVec;
 use std::{net::SocketAddr, str, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -19,13 +20,13 @@ pub struct FixField<'a> {
 
 #[derive(Debug)]
 pub struct FixMessage<'a> {
-    pub fields: Vec<FixField<'a>>,
+    pub fields: SmallVec<[FixField<'a>; 32]>,
 }
 
 impl<'a> FixMessage<'a> {
     #[inline(always)]
     pub fn parse(msg: &'a [u8]) -> Self {
-        let mut fields = Vec::with_capacity(64);
+        let mut fields = SmallVec::<[FixField; 32]>::new();
         let mut i = 0;
 
         while i < msg.len() {
@@ -48,17 +49,17 @@ impl<'a> FixMessage<'a> {
         FixMessage { fields }
     }
 
-    /// 按 tag 找到第一个 value（字节切片）
+    #[inline(always)]
     pub fn get_raw(&self, tag: u16) -> Option<&'a [u8]> {
         self.fields.iter().find(|f| f.tag == tag).map(|f| f.value)
     }
 
-    /// 按 tag 找到并转成 &str
+    #[inline(always)]
     pub fn get_str(&self, tag: u16) -> Option<&'a str> {
         self.get_raw(tag).map(|v| unsafe { std::str::from_utf8_unchecked(v) })
     }
 
-    /// 按 tag 找到并 parse 成任意 FromStr 类型（整数、浮点）
+    #[inline(always)]
     pub fn get<T: std::str::FromStr>(&self, tag: u16) -> Option<T> {
         self.get_str(tag).and_then(|s| s.parse::<T>().ok())
     }
@@ -96,8 +97,8 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: SessionMap) -> Result<()> {
-    let mut buf = [0u8; 4096];
-    let mut data = BytesMut::with_capacity(10240);
+    let mut buf = [0u8; 8192];
+    let mut data = BytesMut::with_capacity(65536);
 
     loop {
         let n = stream.read(&mut buf).await?;
@@ -105,7 +106,8 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
             info!("Connection closed by peer");
             break;
         }
-        data.extend_from_slice(&buf[..n]);
+        data.put_slice(&buf[..n]);
+        // 缓存当前时间字符串，避免多次调用格式化
         let now_str = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
         // 必须使用find_fix_end，因为buf可能两个message粘起来
@@ -162,6 +164,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                     }
                     let _ = stream.shutdown().await;
                     sessions.remove(&client);
+                    break;
                 }
                 Some(b"0") => {
                     if let Some(mut sess) = sessions.get_mut(&client) {
