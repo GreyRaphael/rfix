@@ -24,7 +24,7 @@ pub struct FixMessage<'a> {
 
 impl<'a> FixMessage<'a> {
     pub fn parse(msg: &'a [u8]) -> Self {
-        let mut fields = Vec::with_capacity(4096);
+        let mut fields = Vec::with_capacity(64);
         let mut i = 0;
 
         while i < msg.len() {
@@ -47,8 +47,19 @@ impl<'a> FixMessage<'a> {
         FixMessage { fields }
     }
 
+    /// 按 tag 找到第一个 value（字节切片）
+    pub fn get_raw(&self, tag: u16) -> Option<&'a [u8]> {
+        self.fields.iter().find(|f| f.tag == tag).map(|f| f.value)
+    }
+
+    /// 按 tag 找到并转成 &str
     pub fn get_str(&self, tag: u16) -> Option<&'a str> {
-        self.fields.iter().find(|f| f.tag == tag).and_then(|f| std::str::from_utf8(f.value).ok())
+        self.get_raw(tag).map(|v| unsafe { std::str::from_utf8_unchecked(v) })
+    }
+
+    /// 按 tag 找到并 parse 成任意 FromStr 类型（整数、浮点）
+    pub fn get<T: std::str::FromStr>(&self, tag: u16) -> Option<T> {
+        self.get_str(tag).and_then(|s| s.parse::<T>().ok())
     }
 }
 
