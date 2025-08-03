@@ -1,4 +1,3 @@
-use ahash::AHashMap;
 use anyhow::Result;
 use bytes::BytesMut;
 use chrono::Utc;
@@ -6,11 +5,52 @@ use dashmap::DashMap;
 use log::{debug, error, info};
 use log4rs;
 use memchr::memchr;
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, str, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
+
+#[derive(Debug, Clone, Copy)]
+pub struct FixField<'a> {
+    pub tag: u16,
+    pub value: &'a [u8],
+}
+
+#[derive(Debug)]
+pub struct FixMessage<'a> {
+    pub fields: Vec<FixField<'a>>,
+}
+
+impl<'a> FixMessage<'a> {
+    pub fn parse(msg: &'a [u8]) -> Self {
+        let mut fields = Vec::with_capacity(4096);
+        let mut i = 0;
+
+        while i < msg.len() {
+            let eq = match memchr(b'=', &msg[i..]) {
+                Some(pos) => i + pos,
+                None => break,
+            };
+            let tag = unsafe { str::from_utf8_unchecked(&msg[i..eq]) }.parse().unwrap_or(0);
+
+            let vs = eq + 1;
+            let soh = match memchr(0x01, &msg[vs..]) {
+                Some(pos) => vs + pos,
+                None => break,
+            };
+
+            fields.push(FixField { tag, value: &msg[vs..soh] });
+            i = soh + 1;
+        }
+
+        FixMessage { fields }
+    }
+
+    pub fn get_str(&self, tag: u16) -> Option<&'a str> {
+        self.fields.iter().find(|f| f.tag == tag).and_then(|f| std::str::from_utf8(f.value).ok())
+    }
+}
 
 #[derive(Debug)]
 struct Session {
@@ -62,20 +102,18 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                 break; // Avoid panic, retain data for next round
             }
 
-            let raw = data.split_to(end).to_vec();
+            let raw = data.split_to(end);
             info!("{}", std::str::from_utf8(&raw)?);
 
-            let tags = parse_fix(&raw);
-            debug!("{:?}", tags);
-
-            let msg_type = tags.get(&35).copied();
-            let client = tags.get(&49).unwrap_or(&"").to_string();
-            let server = tags.get(&56).unwrap_or(&"").to_string();
+            let msg = FixMessage::parse(&raw);
+            let msg_type = msg.get_str(35);
+            let client = msg.get_str(49).unwrap_or("").to_string();
+            let server = msg.get_str(56).unwrap_or("").to_string();
 
             match msg_type {
                 Some("A") => {
-                    let encrypt = tags.get(&98).unwrap_or(&"0").to_string();
-                    let hb = tags.get(&108).unwrap_or(&"30").to_string();
+                    let encrypt = msg.get_str(98).unwrap_or("0").to_string();
+                    let hb = msg.get_str(108).unwrap_or("30").to_string();
                     let seq = 1;
 
                     sessions.insert(
@@ -89,13 +127,12 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                             heart_bt_int: hb.clone(),
                         },
                     );
-
                     stream.write_all(&build_logon_response(&server, &client, seq, &encrypt, &hb)).await?;
                 }
                 Some("D") => {
                     if let Some(mut sess) = sessions.get_mut(&client) {
                         if sess.logged_on {
-                            let resp = build_execution_report(&sess.sender, &sess.target, sess.seq_num, &tags);
+                            let resp = build_execution_report(&sess.sender, &sess.target, sess.seq_num, &msg);
                             stream.write_all(&resp).await?;
                             sess.seq_num += 1;
                             info!("{}", std::str::from_utf8(&resp)?);
@@ -152,21 +189,22 @@ fn build_heartbeat(sender: &str, target: &str, seq: u32) -> Vec<u8> {
     ))
 }
 
-fn build_execution_report(sender: &str, target: &str, seq: u32, tags: &AHashMap<u16, &str>) -> Vec<u8> {
+fn build_execution_report(sender: &str, target: &str, seq: u32, msg: &FixMessage) -> Vec<u8> {
+    let get = |tag| msg.get_str(tag).unwrap_or("0");
     build_message(&format!(
         "35=8\u{1}34={}\u{1}49={}\u{1}56={}\u{1}52={}\u{1}6={}\u{1}11={}\u{1}14={}\u{1}17=8\u{1}20=0\u{1}31={}\u{1}32={}\u{1}37=8\u{1}38={}\u{1}39=2\u{1}54={}\u{1}55={}\u{1}150=2\u{1}151=0.00\u{1}",
         seq,
         sender,
         target,
         Utc::now().format("%Y%m%d-%H:%M:%S%.3f"),
-        tags.get(&44).unwrap_or(&"0"),
-        tags.get(&11).unwrap_or(&"UNKNOWN"),
-        tags.get(&38).unwrap_or(&"0"),
-        tags.get(&44).unwrap_or(&"0"),
-        tags.get(&38).unwrap_or(&"0"),
-        tags.get(&38).unwrap_or(&"0"),
-        tags.get(&54).unwrap_or(&"1"),
-        tags.get(&55).unwrap_or(&"UNKNOWN")
+        get(44),
+        get(11),
+        get(38),
+        get(44),
+        get(38),
+        get(38),
+        get(54),
+        get(55)
     ))
 }
 
@@ -179,24 +217,6 @@ fn build_message(body: &str) -> Vec<u8> {
     let checksum = msg.iter().map(|b| *b as u32).sum::<u32>() % 256;
     msg.extend_from_slice(format!("10={:03}\u{1}", checksum).as_bytes());
     msg
-}
-
-fn parse_fix<'a>(msg: &'a [u8]) -> AHashMap<u16, &'a str> {
-    let mut map = AHashMap::new();
-    let mut i = 0;
-    while i < msg.len() {
-        if let Some(eq) = memchr(b'=', &msg[i..]) {
-            if let Some(end) = memchr(1, &msg[i + eq..]) {
-                let tag = std::str::from_utf8(&msg[i..i + eq]).unwrap_or("").parse().unwrap_or(0);
-                let val = std::str::from_utf8(&msg[i + eq + 1..i + eq + end]).unwrap_or("");
-                map.insert(tag, val);
-                i += eq + end + 1;
-                continue;
-            }
-        }
-        break;
-    }
-    map
 }
 
 fn find_fix_end(buf: &[u8]) -> Option<usize> {
