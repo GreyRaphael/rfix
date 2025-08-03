@@ -1,5 +1,6 @@
 use ahash::AHashMap;
 use anyhow::Result;
+use bytes::BytesMut;
 use chrono::Utc;
 use dashmap::DashMap;
 use log::{debug, error, info};
@@ -44,8 +45,7 @@ async fn main() -> Result<()> {
 
 async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: SessionMap) -> Result<()> {
     let mut buf = [0u8; 4096];
-    let mut data = Vec::with_capacity(8192);
-    info!("recv message");
+    let mut data = BytesMut::with_capacity(8192);
 
     loop {
         let n = stream.read(&mut buf).await?;
@@ -55,8 +55,16 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
         }
         data.extend_from_slice(&buf[..n]);
 
+        // 必须使用find_fix_end，因为buf可能两个message粘起来
         while let Some(end) = find_fix_end(&data) {
-            let raw = data.drain(..end).collect::<Vec<u8>>();
+            if end > data.len() {
+                debug!("Invalid FIX message range: end={}, buffer_len={}", end, data.len());
+                break; // Avoid panic, retain data for next round
+            }
+
+            let raw = data.split_to(end).to_vec();
+            info!("{}", std::str::from_utf8(&raw)?);
+
             let tags = parse_fix(&raw);
             debug!("{:?}", tags);
 
@@ -87,10 +95,10 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                 Some("D") => {
                     if let Some(mut sess) = sessions.get_mut(&client) {
                         if sess.logged_on {
-                            stream
-                                .write_all(&build_execution_report(&sess.sender, &sess.target, sess.seq_num, &tags))
-                                .await?;
+                            let resp = build_execution_report(&sess.sender, &sess.target, sess.seq_num, &tags);
+                            stream.write_all(&resp).await?;
                             sess.seq_num += 1;
+                            info!("{}", std::str::from_utf8(&resp)?);
                         }
                     }
                 }
@@ -113,7 +121,6 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                 }
                 _ => {}
             }
-            info!("response message");
         }
     }
     Ok(())
