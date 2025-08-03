@@ -6,7 +6,7 @@ use log::{debug, error, info};
 use log4rs;
 use memchr::memchr;
 use smallvec::SmallVec;
-use std::{net::SocketAddr, str, sync::Arc};
+use std::{fmt::Write, net::SocketAddr, str, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -26,6 +26,7 @@ pub struct FixMessage<'a> {
 impl<'a> FixMessage<'a> {
     #[inline(always)]
     pub fn parse(msg: &'a [u8]) -> Self {
+        // warning字段太长久就改回vec,性能损失1us
         let mut fields = SmallVec::<[FixField; 32]>::new();
         let mut i = 0;
 
@@ -158,7 +159,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                 Some(b"5") => {
                     if let Some(sess) = sessions.get(&client) {
                         stream
-                            .write_all(&build_standard_response("5", &sess.sender, &sess.target, sess.seq_num))
+                            .write_all(&build_logout_response("5", &sess.sender, &sess.target, sess.seq_num))
                             .await?;
                         info!("Logout complete: {}", client);
                     }
@@ -169,7 +170,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                 Some(b"0") => {
                     if let Some(mut sess) = sessions.get_mut(&client) {
                         stream
-                            .write_all(&build_heartbeat(&sess.sender, &sess.target, sess.seq_num, &now_str))
+                            .write_all(&build_heartbeat_response(&sess.sender, &sess.target, sess.seq_num, &now_str))
                             .await?;
                         sess.seq_num += 1;
                         debug!("Responded Heartbeat to {}", client);
@@ -182,51 +183,50 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
     Ok(())
 }
 
-fn build_logon_response(sender: &str, target: &str, seq: u32, encrypt: &str, hb: &str, now_str: &str) -> Vec<u8> {
-    build_message(&format!(
+fn build_logon_response(sender: &str, target: &str, seq: u32, encrypt: &str, hb: &str, now_str: &str) -> BytesMut {
+    let mut body = BytesMut::with_capacity(128);
+    write!(
+        body,
         "35=A\u{1}34={}\u{1}49={}\u{1}56={}\u{1}52={}\u{1}98={}\u{1}108={}\u{1}141=Y\u{1}",
         seq, sender, target, now_str, encrypt, hb
-    ))
+    )
+    .unwrap();
+    build_message(body)
 }
 
-fn build_standard_response(msg_type: &str, sender: &str, target: &str, seq: u32) -> Vec<u8> {
-    build_message(&format!("35={}\u{1}34={}\u{1}49={}\u{1}56={}\u{1}", msg_type, seq, sender, target))
+fn build_logout_response(msg_type: &str, sender: &str, target: &str, seq: u32) -> BytesMut {
+    let mut body = BytesMut::with_capacity(128);
+    write!(body, "35={}\u{1}34={}\u{1}49={}\u{1}56={}\u{1}", msg_type, seq, sender, target).unwrap();
+    build_message(body)
 }
 
-fn build_heartbeat(sender: &str, target: &str, seq: u32, now_str: &str) -> Vec<u8> {
-    build_message(&format!(
-        "35=0\u{1}34={}\u{1}49={}\u{1}56={}\u{1}52={}\u{1}",
-        seq, sender, target, now_str,
-    ))
+fn build_heartbeat_response(sender: &str, target: &str, seq: u32, now_str: &str) -> BytesMut {
+    let mut body = BytesMut::with_capacity(128);
+    write!(body, "35=0\u{1}34={}\u{1}49={}\u{1}56={}\u{1}52={}\u{1}", seq, sender, target, now_str).unwrap();
+    build_message(body)
 }
 
-fn build_execution_report(sender: &str, target: &str, seq: u32, msg: &FixMessage, now_str: &str) -> Vec<u8> {
+fn build_execution_report(sender: &str, target: &str, seq: u32, msg: &FixMessage, now_str: &str) -> BytesMut {
     let get = |tag| msg.get_str(tag).unwrap_or("0");
-    build_message(&format!(
+    let mut body = BytesMut::with_capacity(1024);
+    write!(body,
         "35=8\u{1}34={}\u{1}49={}\u{1}56={}\u{1}52={}\u{1}6={}\u{1}11={}\u{1}14={}\u{1}17=8\u{1}20=0\u{1}31={}\u{1}32={}\u{1}37=8\u{1}38={}\u{1}39=2\u{1}54={}\u{1}55={}\u{1}150=2\u{1}151=0.00\u{1}",
         seq,
         sender,
         target,
         now_str,
-        get(44),
-        get(11),
-        get(38),
-        get(44),
-        get(38),
-        get(38),
-        get(54),
-        get(55)
-    ))
+        get(44), get(11), get(38), get(44), get(38), get(38), get(54), get(55)
+    ).unwrap();
+    build_message(body)
 }
 
-fn build_message(body: &str) -> Vec<u8> {
-    let body_bytes = body.as_bytes();
-    let header = format!("8=FIX.4.2\u{1}9={}\u{1}", body_bytes.len());
-    let mut msg = Vec::with_capacity(header.len() + body_bytes.len() + 10);
-    msg.extend_from_slice(header.as_bytes());
-    msg.extend_from_slice(body_bytes);
+fn build_message(body: BytesMut) -> BytesMut {
+    let body_len = body.len();
+    let mut msg = BytesMut::with_capacity(32 + body_len + 10);
+    write!(msg, "8=FIX.4.2\u{1}9={}\u{1}", body_len).unwrap();
+    msg.unsplit(body);
     let checksum = msg.iter().map(|b| *b as u32).sum::<u32>() % 256;
-    msg.extend_from_slice(format!("10={:03}\u{1}", checksum).as_bytes());
+    write!(msg, "10={:03}\u{1}", checksum).unwrap();
     msg
 }
 
