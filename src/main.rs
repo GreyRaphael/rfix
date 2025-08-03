@@ -23,6 +23,7 @@ pub struct FixMessage<'a> {
 }
 
 impl<'a> FixMessage<'a> {
+    #[inline(always)]
     pub fn parse(msg: &'a [u8]) -> Self {
         let mut fields = Vec::with_capacity(64);
         let mut i = 0;
@@ -105,6 +106,7 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
             break;
         }
         data.extend_from_slice(&buf[..n]);
+        let now_str = Utc::now().format("%Y%m%d-%H:%M:%S%.3f").to_string();
 
         // 必须使用find_fix_end，因为buf可能两个message粘起来
         while let Some(end) = find_fix_end(&data) {
@@ -137,12 +139,14 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                             heart_bt_int: hb.clone(),
                         },
                     );
-                    stream.write_all(&build_logon_response(&server, &client, seq, &encrypt, &hb)).await?;
+                    stream
+                        .write_all(&build_logon_response(&server, &client, seq, &encrypt, &hb, &now_str))
+                        .await?;
                 }
                 Some(b"D") => {
                     if let Some(mut sess) = sessions.get_mut(&client) {
                         if sess.logged_on {
-                            let resp = build_execution_report(&sess.sender, &sess.target, sess.seq_num, &msg);
+                            let resp = build_execution_report(&sess.sender, &sess.target, sess.seq_num, &msg, &now_str);
                             stream.write_all(&resp).await?;
                             sess.seq_num += 1;
                             info!("{}", std::str::from_utf8(&resp)?);
@@ -161,7 +165,9 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
                 }
                 Some(b"0") => {
                     if let Some(mut sess) = sessions.get_mut(&client) {
-                        stream.write_all(&build_heartbeat(&sess.sender, &sess.target, sess.seq_num)).await?;
+                        stream
+                            .write_all(&build_heartbeat(&sess.sender, &sess.target, sess.seq_num, &now_str))
+                            .await?;
                         sess.seq_num += 1;
                         debug!("Responded Heartbeat to {}", client);
                     }
@@ -173,15 +179,10 @@ async fn handle_connection(mut stream: TcpStream, _addr: SocketAddr, sessions: S
     Ok(())
 }
 
-fn build_logon_response(sender: &str, target: &str, seq: u32, encrypt: &str, hb: &str) -> Vec<u8> {
+fn build_logon_response(sender: &str, target: &str, seq: u32, encrypt: &str, hb: &str, now_str: &str) -> Vec<u8> {
     build_message(&format!(
         "35=A\u{1}34={}\u{1}49={}\u{1}56={}\u{1}52={}\u{1}98={}\u{1}108={}\u{1}141=Y\u{1}",
-        seq,
-        sender,
-        target,
-        Utc::now().format("%Y%m%d-%H:%M:%S%.3f"),
-        encrypt,
-        hb
+        seq, sender, target, now_str, encrypt, hb
     ))
 }
 
@@ -189,24 +190,21 @@ fn build_standard_response(msg_type: &str, sender: &str, target: &str, seq: u32)
     build_message(&format!("35={}\u{1}34={}\u{1}49={}\u{1}56={}\u{1}", msg_type, seq, sender, target))
 }
 
-fn build_heartbeat(sender: &str, target: &str, seq: u32) -> Vec<u8> {
+fn build_heartbeat(sender: &str, target: &str, seq: u32, now_str: &str) -> Vec<u8> {
     build_message(&format!(
         "35=0\u{1}34={}\u{1}49={}\u{1}56={}\u{1}52={}\u{1}",
-        seq,
-        sender,
-        target,
-        Utc::now().format("%Y%m%d-%H:%M:%S%.3f")
+        seq, sender, target, now_str,
     ))
 }
 
-fn build_execution_report(sender: &str, target: &str, seq: u32, msg: &FixMessage) -> Vec<u8> {
+fn build_execution_report(sender: &str, target: &str, seq: u32, msg: &FixMessage, now_str: &str) -> Vec<u8> {
     let get = |tag| msg.get_str(tag).unwrap_or("0");
     build_message(&format!(
         "35=8\u{1}34={}\u{1}49={}\u{1}56={}\u{1}52={}\u{1}6={}\u{1}11={}\u{1}14={}\u{1}17=8\u{1}20=0\u{1}31={}\u{1}32={}\u{1}37=8\u{1}38={}\u{1}39=2\u{1}54={}\u{1}55={}\u{1}150=2\u{1}151=0.00\u{1}",
         seq,
         sender,
         target,
-        Utc::now().format("%Y%m%d-%H:%M:%S%.3f"),
+        now_str,
         get(44),
         get(11),
         get(38),
@@ -230,7 +228,9 @@ fn build_message(body: &str) -> Vec<u8> {
 }
 
 fn find_fix_end(buf: &[u8]) -> Option<usize> {
-    let start = buf.windows(2).position(|w| w == b"8=")?; // MsgStart
+    // 定位 8= 开头
+    let start = buf.windows(2).position(|w| w == b"8=")?;
+    // 定位 9= 后面的 body length
     let body_start = buf[start..].windows(2).position(|w| w == b"9=")? + start;
     let from = body_start + 2;
     let end_pos = memchr(1, &buf[from..])?;
