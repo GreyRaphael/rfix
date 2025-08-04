@@ -1,10 +1,7 @@
 use anyhow::Result;
 use bytes::{BufMut, BytesMut};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use dashmap::DashMap;
-use fast_log;
-use fast_log::appender::{FastLogRecord, RecordFormat};
-use fast_log::config::Config;
 use log::{debug, error, info};
 use memchr::memchr;
 use smallvec::SmallVec;
@@ -13,6 +10,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
+pub mod logger;
 
 #[derive(Debug, Clone, Copy)]
 pub struct FixField<'a> {
@@ -80,27 +78,13 @@ struct Session {
 
 type SessionMap = Arc<DashMap<String, Session>>;
 
-pub struct NanoFormatter;
-
-impl RecordFormat for NanoFormatter {
-    fn do_format(&self, record: &mut FastLogRecord) {
-        record.formated = format!(
-            "{} [{}] {}\n",
-            // DateTime::<Local>::from(record.now).format("%FT%T%.9f"),
-            DateTime::<Utc>::from(record.now).format("%FT%T%.9f"),
-            record.level,
-            record.args
-        );
-    }
-}
-
 // #[tokio::main]
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
-    fast_log::init(Config::new().format(NanoFormatter).file("app.log").chan_len(Some(10240)))?;
+    logger::init_logger()?;
     info!("Server starting...");
 
-    let listener = TcpListener::bind("0.0.0.0:9888").await?;
+    let listener = TcpListener::bind("0.0.0.0:9889").await?;
     let sessions: SessionMap = Arc::new(DashMap::new());
 
     loop {

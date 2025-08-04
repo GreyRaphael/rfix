@@ -1,0 +1,10 @@
+[root]
+level = "info"
+appenders = ["stdout", "logfile"]
+
+[appenders.stdout]
+kind = "console"
+
+[appenders.logfile]
+kind = "file"
+path = "app.log"
